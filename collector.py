@@ -273,19 +273,29 @@ def fetch_chainlink_price(
 
 
 # ---------------------------------------------------------------------------
-# Binance
+# Exchange price (Binance with CoinGecko fallback)
 # ---------------------------------------------------------------------------
 
-def fetch_binance_price(session: requests.Session, symbol: str) -> Optional[dict]:
+COINGECKO_IDS = {"btc": "bitcoin", "eth": "ethereum"}
+
+def fetch_exchange_price(session: requests.Session, symbol: str, asset: str) -> Optional[dict]:
+    """Fetch exchange price. Tries Binance first, falls back to CoinGecko."""
+    result = _fetch_binance_price(session, symbol)
+    if result:
+        return result
+
+    return _fetch_coingecko_price(session, asset)
+
+
+def _fetch_binance_price(session: requests.Session, symbol: str) -> Optional[dict]:
     """Fetch Binance best bid/ask for a symbol."""
     try:
         resp = session.get(
             BINANCE_TICKER_URL,
             params={"symbol": symbol},
-            timeout=10,
+            timeout=5,
         )
         if resp.status_code != 200:
-            logger.debug("Binance ticker %d for %s", resp.status_code, symbol)
             return None
 
         data = resp.json()
@@ -294,9 +304,37 @@ def fetch_binance_price(session: requests.Session, symbol: str) -> Optional[dict
         return {
             "price": (bid + ask) / 2,
             "spread": ask - bid,
+            "source": "binance",
+        }
+    except Exception:
+        return None
+
+
+def _fetch_coingecko_price(session: requests.Session, asset: str) -> Optional[dict]:
+    """Fetch price from CoinGecko free API (no key needed, works everywhere)."""
+    cg_id = COINGECKO_IDS.get(asset)
+    if not cg_id:
+        return None
+
+    try:
+        resp = session.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": cg_id, "vs_currencies": "usd"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.debug("CoinGecko %d", resp.status_code)
+            return None
+
+        data = resp.json()
+        price = float(data[cg_id]["usd"])
+        return {
+            "price": price,
+            "spread": 0.0,  # CoinGecko doesn't provide bid/ask
+            "source": "coingecko",
         }
     except Exception as e:
-        logger.debug("Binance ticker error: %s", e)
+        logger.debug("CoinGecko error: %s", e)
         return None
 
 
@@ -352,8 +390,8 @@ def collect_once(
     # Fetch Chainlink oracle price (the settlement price for UpDown markets)
     chainlink_price = fetch_chainlink_price(session, asset, polygon_rpc_url)
 
-    # Fetch Binance spot price
-    binance = fetch_binance_price(session, binance_symbol)
+    # Fetch exchange spot price (Binance with CoinGecko fallback)
+    binance = fetch_exchange_price(session, binance_symbol, asset)
 
     # Compute oracle-vs-exchange spread (key signal: when Chainlink diverges
     # from Binance, UpDown implied prob may be mispriced)
@@ -390,10 +428,11 @@ def collect_once(
 
     midpoint = poly["midpoint"] if poly and poly.get("midpoint") else "N/A"
     cl_str = f"${chainlink_price:.2f}" if chainlink_price else "N/A"
-    bn_str = f"${binance['price']:.2f}" if binance else "N/A"
+    src = binance.get("source", "?") if binance else "N/A"
+    bn_str = f"${binance['price']:.2f}({src})" if binance else "N/A"
     spread_str = f"${oracle_vs_binance:.2f}" if oracle_vs_binance is not None else "N/A"
     logger.info(
-        "Collected: midpoint=%s, chainlink=%s, binance=%s, oracle_spread=%s",
+        "Collected: midpoint=%s, chainlink=%s, exchange=%s, oracle_spread=%s",
         midpoint, cl_str, bn_str, spread_str,
     )
 
