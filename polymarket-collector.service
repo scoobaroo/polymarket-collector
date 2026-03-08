@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket UpDown Data Collector
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/polymarket-collector
+ExecStart=/opt/polymarket-collector/venv/bin/python collector.py --interval 30 --asset btc
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/polymarket-collector/.env
+
+[Install]
+WantedBy=multi-user.target
